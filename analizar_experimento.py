@@ -5,10 +5,10 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-
+nombre_experimento = "20251001 mhci mhcii 25d1"
 BASE_DIR = Path(__file__).resolve().parent
 INPUT_DIR = BASE_DIR / "input"
-OUTPUT_DIR = BASE_DIR / "output"
+OUTPUT_DIR = BASE_DIR / "output" / nombre_experimento
 
 # Filtro de fagosomas aberrantes (outliers)
 APLICAR_FILTRO_ABERRANTES = True
@@ -20,14 +20,25 @@ MIN_PARAMETROS_ABERRANTES = 1
 COLUMNAS_EXCLUIDAS_FILTRO = {"Event #"}
 
 # Cantidad de fagosomas con mayor valor (post-ordenamiento) que no se grafican.
-DESCARTAR_PRIMEROS_N = 150
+DESCARTAR_PRIMEROS_N = 100
 
 # Suavizado de curvas (se aplica a todos los parametros excepto al usado para ordenar)
 APLICAR_SUAVIZADO = True
 # Opciones: "moving_median", "moving_average", "ewm"
-METODO_SUAVIZADO = "moving_average"
-VENTANA_SUAVIZADO = 200
+METODO_SUAVIZADO = "moving_median"
+VENTANA_SUAVIZADO = 100
 EWM_ALPHA = 0.25
+
+# Limpieza de outliers en derivada primera (antes de calcular derivada segunda)
+APLICAR_FILTRO_D1_ABERRANTES = True
+D1_IQR_FACTOR = 3.0
+
+# Suavizado de derivada primera (despues de quitar outliers y antes de derivada segunda)
+APLICAR_SUAVIZADO_D1 = True
+# Opciones: "moving_median", "moving_average", "ewm"
+D1_METODO_SUAVIZADO = "moving_median"
+D1_VENTANA_SUAVIZADO = 100
+D1_EWM_ALPHA = 0.25
 
 # Deteccion de escalon en la curva del parametro usado para ordenar
 DETECTAR_ESCALON = True
@@ -173,6 +184,31 @@ def suavizar_serie(serie, metodo="moving_median", ventana=9, ewm_alpha=0.25):
 	)
 
 
+def limpiar_outliers_iqr_serie(serie, iqr_factor=3.0):
+	"""
+	Reemplaza outliers por NaN y luego interpola para mantener el largo de la serie.
+	Devuelve (serie_limpia, cantidad_outliers).
+	"""
+	serie_num = pd.to_numeric(serie, errors="coerce")
+	q1 = serie_num.quantile(0.25)
+	q3 = serie_num.quantile(0.75)
+	iqr = q3 - q1
+
+	if pd.isna(iqr) or iqr == 0:
+		return serie_num.copy(), 0
+
+	limite_inferior = q1 - iqr_factor * iqr
+	limite_superior = q3 + iqr_factor * iqr
+
+	mascara_outlier = (serie_num < limite_inferior) | (serie_num > limite_superior)
+	cantidad_outliers = int(mascara_outlier.fillna(False).sum())
+
+	serie_limpia = serie_num.mask(mascara_outlier)
+	serie_limpia = serie_limpia.interpolate(limit_direction="both")
+
+	return serie_limpia, cantidad_outliers
+
+
 def detectar_limites_escalon(
 	serie,
 	ventana_suavizado=21,
@@ -289,6 +325,176 @@ def detectar_limites_escalon(
 		return None
 
 	return int(idx_inicio), int(idx_fin)
+
+
+def _limpiar_nombre_archivo(texto):
+	texto = texto.replace(".csv", "")
+	permitidos = "-_() "
+	return "".join(c for c in texto if c.isalnum() or c in permitidos).strip().replace(" ", "_")
+
+
+def graficar_parametro_y_derivadas(
+	datos_por_csv,
+	columna_ordenar,
+	ascendente=False,
+	descartar_primeros_n=0,
+	aplicar_filtro_aberrantes=False,
+	iqr_factor=3.0,
+	min_parametros_aberrantes=1,
+	columnas_excluidas_filtro=None,
+	aplicar_suavizado=True,
+	metodo_suavizado="moving_median",
+	ventana_suavizado=9,
+	ewm_alpha=0.25,
+	aplicar_filtro_d1_aberrantes=False,
+	d1_iqr_factor=3.0,
+	aplicar_suavizado_d1=False,
+	d1_metodo_suavizado="moving_average",
+	d1_ventana_suavizado=25,
+	d1_ewm_alpha=0.25,
+):
+	"""
+	Para cada CSV, genera una figura con 3 graficos apilados:
+	1) parametro de ordenamiento (ya suavizado),
+	2) derivada primera,
+	3) derivada segunda.
+	"""
+	if not datos_por_csv:
+		raise ValueError("El diccionario de CSV esta vacio.")
+
+	OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+	rutas_guardadas = []
+	resumen_filtro = {}
+	resumen_outliers_d1 = {}
+
+	for nombre_csv, df_original in datos_por_csv.items():
+		df_actual = df_original
+
+		if aplicar_filtro_aberrantes:
+			df_actual, eliminados = filtrar_fagosomas_aberrantes_iqr(
+				df_actual,
+				iqr_factor=iqr_factor,
+				min_parametros_aberrantes=min_parametros_aberrantes,
+				columnas_excluidas=columnas_excluidas_filtro,
+			)
+			resumen_filtro[nombre_csv] = eliminados
+		else:
+			resumen_filtro[nombre_csv] = 0
+
+		datos_tmp = {nombre_csv: df_actual}
+		df_ordenado = ordenar_dataframe_por_columna(
+			datos_tmp, nombre_csv, columna_ordenar, ascendente=ascendente
+		)
+		df_ordenado = df_ordenado.iloc[descartar_primeros_n:].reset_index(drop=True)
+
+		if df_ordenado.empty:
+			continue
+
+		serie_original = pd.to_numeric(df_ordenado[columna_ordenar], errors="coerce")
+		serie_original = serie_original.interpolate(limit_direction="both")
+
+		serie = serie_original.copy()
+
+		if aplicar_suavizado:
+			serie = suavizar_serie(
+				serie,
+				metodo=metodo_suavizado,
+				ventana=ventana_suavizado,
+				ewm_alpha=ewm_alpha,
+			)
+
+		serie = serie.interpolate(limit_direction="both")
+		y = serie.to_numpy(dtype=float)
+
+		if len(y) < 3:
+			continue
+
+		x = np.arange(1, len(y) + 1)
+		d1 = np.gradient(y)
+
+		d1_serie = pd.Series(d1)
+		if aplicar_filtro_d1_aberrantes:
+			d1_serie, cantidad_d1_outliers = limpiar_outliers_iqr_serie(
+				d1_serie, iqr_factor=d1_iqr_factor
+			)
+		else:
+			cantidad_d1_outliers = 0
+		resumen_outliers_d1[nombre_csv] = cantidad_d1_outliers
+		d1_sin_suavizar = d1_serie.copy()
+
+		if aplicar_suavizado_d1:
+			d1_serie = suavizar_serie(
+				d1_serie,
+				metodo=d1_metodo_suavizado,
+				ventana=d1_ventana_suavizado,
+				ewm_alpha=d1_ewm_alpha,
+			)
+
+		d1 = d1_serie.to_numpy(dtype=float)
+		d2 = np.gradient(d1)
+
+		fig, ejes = plt.subplots(3, 1, figsize=(12, 9), sharex=True, constrained_layout=True)
+
+		detalle_suavizado = "suavizado=off"
+		if aplicar_suavizado:
+			detalle_suavizado = f"suavizado={metodo_suavizado}"
+			if metodo_suavizado in {"moving_median", "moving_average"}:
+				detalle_suavizado += f"(w={ventana_suavizado})"
+			if metodo_suavizado == "ewm":
+				detalle_suavizado += f"(alpha={ewm_alpha})"
+
+		detalle_iqr = f"IQR_factor={iqr_factor}" if aplicar_filtro_aberrantes else "IQR=off"
+		detalle_d1 = (
+			f"D1_outliers=off"
+			if not aplicar_filtro_d1_aberrantes
+			else f"D1_outliers=IQR({d1_iqr_factor})"
+		)
+		detalle_d1_suavizado = "D1_smooth=off"
+		if aplicar_suavizado_d1:
+			detalle_d1_suavizado = f"D1_smooth={d1_metodo_suavizado}"
+			if d1_metodo_suavizado in {"moving_median", "moving_average"}:
+				detalle_d1_suavizado += f"(w={d1_ventana_suavizado})"
+			if d1_metodo_suavizado == "ewm":
+				detalle_d1_suavizado += f"(alpha={d1_ewm_alpha})"
+		fig.suptitle(
+			(
+				f"{nombre_csv}\n"
+				f"{detalle_iqr} | {detalle_suavizado} | {detalle_d1} | {detalle_d1_suavizado}"
+			),
+			fontsize=12,
+		)
+
+		ejes[0].plot(x, serie_original.to_numpy(dtype=float), color="0.6", linewidth=1.0, label="Original")
+		ejes[0].plot(x, y, color="tab:blue", linewidth=1.2, label="Suavizado")
+		ejes[0].set_ylabel(f"{columna_ordenar} (suavizado)")
+		ejes[0].grid(True, linestyle="--", alpha=0.3)
+		ejes[0].legend(loc="best", fontsize=8)
+
+		ejes[1].plot(
+			x,
+			d1_sin_suavizar.to_numpy(dtype=float),
+			color="tab:purple",
+			linewidth=1.0,
+			label="D1 sin suavizar (sin outliers)",
+		)
+		ejes[1].plot(x, d1, color="tab:orange", linewidth=1.1, label="D1 suavizada")
+		ejes[1].set_ylabel("Derivada 1")
+		ejes[1].grid(True, linestyle="--", alpha=0.3)
+		ejes[1].legend(loc="best", fontsize=8)
+
+		ejes[2].plot(x, d2, color="tab:green", linewidth=1.1)
+		ejes[2].set_ylabel("Derivada 2")
+		ejes[2].set_xlabel("Cuenta acumulativa de fagosomas")
+		ejes[2].grid(True, linestyle="--", alpha=0.3)
+
+		nombre_salida = _limpiar_nombre_archivo(nombre_csv)
+		ruta_salida = OUTPUT_DIR / f"derivadas_{nombre_salida}.png"
+		fig.savefig(ruta_salida, dpi=220)
+		plt.close(fig)
+		rutas_guardadas.append(ruta_salida)
+
+	return rutas_guardadas, resumen_filtro, resumen_outliers_d1
 
 
 def graficar_parametros_por_csv(
@@ -462,7 +668,7 @@ def graficar_parametros_por_csv(
 
 
 if __name__ == "__main__":
-	nombre_experimento = "20250924 mhci mhcii 25d1"
+	
 	datos = cargar_experimento_como_dataframes(nombre_experimento)
 
 	print(f"Experimento: {nombre_experimento}")
@@ -471,11 +677,11 @@ if __name__ == "__main__":
 		print(f"- {nombre_csv}: {len(df)} fagosomas")
 
 	columna_a_ordenar = "OVA"
-	rutas, resumen_filtro, resumen_escalon = graficar_parametros_por_csv(
+	rutas, resumen_filtro, resumen_outliers_d1 = graficar_parametro_y_derivadas(
 		datos,
 		columna_a_ordenar,
 		ascendente=False,
-		descartar_primeros_n=50,
+		descartar_primeros_n=DESCARTAR_PRIMEROS_N,
 		aplicar_filtro_aberrantes=APLICAR_FILTRO_ABERRANTES,
 		iqr_factor=IQR_FACTOR,
 		min_parametros_aberrantes=MIN_PARAMETROS_ABERRANTES,
@@ -484,13 +690,12 @@ if __name__ == "__main__":
 		metodo_suavizado=METODO_SUAVIZADO,
 		ventana_suavizado=VENTANA_SUAVIZADO,
 		ewm_alpha=EWM_ALPHA,
-		detectar_escalon=DETECTAR_ESCALON,
-		ventana_suavizado_escalon=VENTANA_SUAVIZADO_ESCALON,
-		factor_umbral_pendiente=FACTOR_UMBRAL_PENDIENTE,
-		longitud_min_escalon=LONGITUD_MIN_ESCALON,
-		longitud_max_escalon=LONGITUD_MAX_ESCALON,
-		paso_busqueda_escalon=PASO_BUSQUEDA_ESCALON,
-		top_candidatos_escalon=TOP_CANDIDATOS_ESCALON,
+		aplicar_filtro_d1_aberrantes=APLICAR_FILTRO_D1_ABERRANTES,
+		d1_iqr_factor=D1_IQR_FACTOR,
+		aplicar_suavizado_d1=APLICAR_SUAVIZADO_D1,
+		d1_metodo_suavizado=D1_METODO_SUAVIZADO,
+		d1_ventana_suavizado=D1_VENTANA_SUAVIZADO,
+		d1_ewm_alpha=D1_EWM_ALPHA,
 	)
 
 	if APLICAR_FILTRO_ABERRANTES:
@@ -498,14 +703,11 @@ if __name__ == "__main__":
 		for nombre_csv, eliminados in resumen_filtro.items():
 			print(f"- {nombre_csv}: {eliminados}")
 
-	if DETECTAR_ESCALON:
-		print("\nLimites del escalon (x_inicio, x_fin) en parametro de ordenamiento:")
-		for nombre_csv, limites in resumen_escalon.items():
-			if limites is None:
-				print(f"- {nombre_csv}: no detectado")
-			else:
-				print(f"- {nombre_csv}: {limites}")
+	if APLICAR_FILTRO_D1_ABERRANTES:
+		print("\nOutliers removidos en derivada 1 (antes de derivada 2):")
+		for nombre_csv, cantidad in resumen_outliers_d1.items():
+			print(f"- {nombre_csv}: {cantidad}")
 
-	print("\nFiguras generadas:")
+	print("\nFiguras generadas (parametro + derivada 1 + derivada 2):")
 	for ruta in rutas:
 		print(f"- {ruta}")
