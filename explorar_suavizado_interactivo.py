@@ -10,8 +10,8 @@ import pandas as pd
 
 # Configuracion principal
 BASE_DIR = Path(__file__).resolve().parent
-CSV_PATH = BASE_DIR / "input" / "20251010 mhci,mhcii,25d1,lamp" / "MHCI MHCII 25D1 LAMP1 OVA_ctrl 15.exported.FCS3.csv"
-PARAMETRO = 'Comp-Alexa405-A'
+CSV_PATH = BASE_DIR / "input" / "20251010 mhci,mhcii,25d1,lamp" / "MHCI MHCII 25D1 LAMP1 OVA_ctrl 120.exported.FCS3.csv"
+PARAMETRO = 'LAMP1'
 ASCENDENTE = False
 
 # Parametros iniciales de suavizado expresados como % del total de fagosomas
@@ -58,6 +58,14 @@ MAX_GRAFICOS_POR_FIGURA_NUEVA = 3
 EXTRAS_VENTANA_PCT_INICIAL = 5.0
 EXTRAS_VENTANA_PCT_MIN = 0.1
 EXTRAS_VENTANA_PCT_MAX = 100.0
+
+# Segundo parametro para ordenar cada zona L/E/D en forma decreciente.
+PARAMETRO_ORDEN_ZONAS = "OVA"
+
+# Suavizado para la figura por zonas (L/E/D) ordenada por segundo parametro.
+ZONAS_VENTANA_PCT_INICIAL = 5.0
+ZONAS_VENTANA_PCT_MIN = 0.1
+ZONAS_VENTANA_PCT_MAX = 100.0
 
 
 def suavizar_serie(serie: pd.Series, metodo: str, ventana: int, ewm_alpha: float) -> pd.Series:
@@ -158,6 +166,14 @@ def _fmt_media(valor: float) -> str:
     return f"{valor:.4g}"
 
 
+def _resolver_columna_existente(df: pd.DataFrame, columna: str, mensaje: str) -> str:
+    while columna not in df.columns:
+        print(f"[WARN] Falta columna: {columna}")
+        print(df.columns)
+        columna = input(mensaje)
+    return columna
+
+
 def cargar_y_preparar_datos(csv_path: Path, parametro: str, ascendente: bool) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     if not csv_path.exists():
         raise FileNotFoundError(f"No existe el archivo: {csv_path}")
@@ -205,6 +221,15 @@ def obtener_series_adicionales(
 def main() -> None:
     df_ordenado, x, y_original = cargar_y_preparar_datos(CSV_PATH, PARAMETRO, ASCENDENTE)
     series_adicionales = obtener_series_adicionales(df_ordenado, PARAMETRO, PARAMETROS_NO_GRAFICAR)
+    parametro_orden_zonas = _resolver_columna_existente(
+        df_ordenado,
+        PARAMETRO_ORDEN_ZONAS.replace(' ', ''),
+        "Ingrese nombre del segundo parametro para ordenar zonas (L/E/D): ",
+    )
+    parametros_restantes_zonas = [
+        nombre for nombre, _serie in series_adicionales if nombre != parametro_orden_zonas
+    ]
+    parametros_zonas = [parametro_orden_zonas] + parametros_restantes_zonas
 
     n_total = len(y_original)
     ventana_inicial = _pct_a_ventana(VENTANA_PCT_INICIAL, n_total)
@@ -344,6 +369,57 @@ def main() -> None:
 
             ejes_extra[-1].set_xlabel("Cuenta acumulativa de fagosomas")
 
+    fig_zonas = None
+    lineas_zonas: list[tuple[object, object, str, int]] = []
+    titulos_zonas: list[object] = []
+    slider_zonas = None
+    nombres_zona = ["L", "E", "D"]
+    if len(parametros_zonas) > 0:
+        n_filas_zonas = len(parametros_zonas)
+        alto_figura_zonas = max(8, 2.0 * n_filas_zonas + 2)
+        fig_zonas, ejes_zonas = plt.subplots(
+            n_filas_zonas,
+            3,
+            figsize=(16, alto_figura_zonas),
+            sharex="col",
+        )
+        fig_zonas.subplots_adjust(bottom=0.10, hspace=0.30, wspace=0.20)
+        fig_zonas.suptitle(
+            f"{CSV_PATH.name} | Zonas L/E/D ordenadas por {parametro_orden_zonas} (desc)",
+            fontsize=11,
+        )
+
+        if n_filas_zonas == 1:
+            ejes_zonas = np.array([ejes_zonas])
+
+        for i_fila, nombre_param in enumerate(parametros_zonas):
+            for i_col, nombre_zona in enumerate(nombres_zona):
+                ax_zona = ejes_zonas[i_fila, i_col]
+                linea_zona, = ax_zona.plot([], [], linewidth=1.0, color="tab:blue")
+                ax_zona.grid(True, linestyle="--", alpha=0.3)
+
+                if i_fila == 0:
+                    titulo_col = ax_zona.set_title(f"Zona {nombre_zona}", fontsize=10)
+                    titulos_zonas.append(titulo_col)
+
+                if i_col == 0:
+                    ax_zona.set_ylabel(nombre_param)
+
+                if i_fila == n_filas_zonas - 1:
+                    ax_zona.set_xlabel("Indice tras ordenar por segundo parametro")
+
+                lineas_zonas.append((ax_zona, linea_zona, nombre_param, i_col))
+
+        slider_ax_zonas = fig_zonas.add_axes([0.18, 0.03, 0.64, 0.025])
+        slider_zonas = Slider(
+            ax=slider_ax_zonas,
+            label="Ventana suavizado zonas (%)",
+            valmin=ZONAS_VENTANA_PCT_MIN,
+            valmax=ZONAS_VENTANA_PCT_MAX,
+            valinit=ZONAS_VENTANA_PCT_INICIAL,
+            valstep=0.1,
+        )
+
     txt_inicio = ax_param.text(0, 0, "", fontsize=8, color="tab:red", ha="left", va="bottom")
     txt_fin = ax_param.text(0, 0, "", fontsize=8, color="tab:red", ha="left", va="bottom")
     txt_pendiente = ax_param.text(0, 0, "", fontsize=8, color="tab:purple", ha="left", va="bottom")
@@ -429,6 +505,10 @@ def main() -> None:
                 linea_ini.set_visible(False)
                 linea_fin.set_visible(False)
                 txt_medias.set_text("")
+            for _ax_zona, linea_zona, _nombre_param, _i_col in lineas_zonas:
+                linea_zona.set_data([], [])
+            for i_col, txt_titulo in enumerate(titulos_zonas):
+                txt_titulo.set_text(f"Zona {nombres_zona[i_col]} (sin datos)")
             txt_inicio.set_text("")
             txt_fin.set_text("")
             txt_pendiente.set_text("")
@@ -549,6 +629,58 @@ def main() -> None:
                 linea_fin.set_visible(False)
                 txt_medias.set_text("Sin escalon detectado")
 
+        if len(idx_escalon) == 3 and len(lineas_zonas) > 0:
+            idx_inicio_z = int(idx_escalon[0])
+            idx_fin_z = int(idx_escalon[2])
+
+            if descartar_fin == 0:
+                df_base = df_ordenado.iloc[descartar_ini:].reset_index(drop=True)
+            else:
+                df_base = df_ordenado.iloc[descartar_ini:-descartar_fin].reset_index(drop=True)
+
+            zonas_df = [
+                df_base.iloc[:idx_inicio_z].copy(),
+                df_base.iloc[idx_inicio_z:idx_fin_z + 1].copy(),
+                df_base.iloc[idx_fin_z + 1:].copy(),
+            ]
+
+            for i_col, zona_df in enumerate(zonas_df):
+                if len(zona_df) > 0:
+                    zona_df.sort_values(by=parametro_orden_zonas, ascending=False, inplace=True)
+                    zona_df.reset_index(drop=True, inplace=True)
+                zonas_df[i_col] = zona_df
+
+            for i_col, txt_titulo in enumerate(titulos_zonas):
+                txt_titulo.set_text(f"Zona {nombres_zona[i_col]} (n={len(zonas_df[i_col])})")
+
+            for ax_zona, linea_zona, nombre_param, i_col in lineas_zonas:
+                zona_df = zonas_df[i_col]
+                if len(zona_df) == 0:
+                    linea_zona.set_data([], [])
+                    continue
+
+                serie_zona = pd.to_numeric(
+                    zona_df[nombre_param],
+                    errors="coerce",
+                ).interpolate(limit_direction="both")
+                y_zona = serie_zona.to_numpy(dtype=float)
+                x_zona = np.arange(1, len(y_zona) + 1)
+
+                ventana_z = _pct_a_ventana(float(slider_zonas.val), len(y_zona)) if slider_zonas is not None else 1
+                y_zona_s = suavizar_serie(
+                    pd.Series(y_zona),
+                    metodo=METODO_SUAVIZADO,
+                    ventana=ventana_z,
+                    ewm_alpha=EWM_ALPHA,
+                ).to_numpy(dtype=float)
+
+                linea_zona.set_data(x_zona, y_zona_s)
+        else:
+            for _ax_zona, linea_zona, _nombre_param, _i_col in lineas_zonas:
+                linea_zona.set_data([], [])
+            for i_col, txt_titulo in enumerate(titulos_zonas):
+                txt_titulo.set_text(f"Zona {nombres_zona[i_col]} (sin escalon)")
+
         if len(idx_escalon) == 3:
             idx_inicio = int(idx_escalon[0])
             idx_medio = int(idx_escalon[1])
@@ -586,6 +718,9 @@ def main() -> None:
         for ax_extra, _linea_extra, _linea_ini, _linea_fin, _txt_medias, _nombre, _y, _slider_extra in lineas_adicionales:
             ax_extra.relim()
             ax_extra.autoscale_view()
+        for ax_zona, _linea_zona, _nombre_param, _i_col in lineas_zonas:
+            ax_zona.relim()
+            ax_zona.autoscale_view()
 
         ax_param.set_title(
             (
@@ -599,6 +734,8 @@ def main() -> None:
         fig.canvas.draw_idle()
         for fig_extra in figuras_extra:
             fig_extra.canvas.draw_idle()
+        if fig_zonas is not None:
+            fig_zonas.canvas.draw_idle()
 
     slider_descartar_ini.on_changed(actualizar)
     slider_descartar_fin.on_changed(actualizar)
@@ -607,6 +744,8 @@ def main() -> None:
     slider_ventana_d2.on_changed(actualizar)
     for slider_extra in sliders_extras:
         slider_extra.on_changed(actualizar)
+    if slider_zonas is not None:
+        slider_zonas.on_changed(actualizar)
     actualizar(ventana_inicial)
     plt.show()
 
