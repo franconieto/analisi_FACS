@@ -10,8 +10,8 @@ import pandas as pd
 
 # Configuracion principal
 BASE_DIR = Path(__file__).resolve().parent
-CSV_PATH = BASE_DIR / "input" / "20251010 mhci,mhcii,25d1,lamp" / "MHCI MHCII 25D1 LAMP1 OVA_ctrl 120.exported.FCS3.csv"
-PARAMETRO = 'LAMP1'
+CSV_PATH = BASE_DIR / "input" / "20250924 mhci,mhcii,25d1,lamp" / "LAMP1 MHCI MHCII 25D1 OVA_n 15.exported.FCS3.csv"
+PARAMETRO = 'OVA'
 ASCENDENTE = False
 
 # Parametros iniciales de suavizado expresados como % del total de fagosomas
@@ -60,7 +60,7 @@ EXTRAS_VENTANA_PCT_MIN = 0.1
 EXTRAS_VENTANA_PCT_MAX = 100.0
 
 # Segundo parametro para ordenar cada zona L/E/D en forma decreciente.
-PARAMETRO_ORDEN_ZONAS = "OVA"
+PARAMETRO_ORDEN_ZONAS = "LAMP1"
 
 # Suavizado para la figura por zonas (L/E/D) ordenada por segundo parametro.
 ZONAS_VENTANA_PCT_INICIAL = 5.0
