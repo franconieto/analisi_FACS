@@ -687,11 +687,12 @@ def main() -> None:
             idx_fin = int(idx_escalon[2])
             n_total_considerado = len(x_actual)
 
+            
             txt_inicio.set_position((x_actual[idx_inicio], y_s[idx_inicio]))
-            txt_inicio.set_text(f"ini: {idx_inicio + 1}/{n_total_considerado}")
+            txt_inicio.set_text(f"ini: {(idx_inicio + 1)/n_total_considerado:.4%}")
 
             txt_fin.set_position((x_actual[idx_fin], y_s[idx_fin]))
-            txt_fin.set_text(f"fin: {idx_fin + 1}/{n_total_considerado}")
+            txt_fin.set_text(f"fin: {(idx_fin + 1)/n_total_considerado:.4%}")
 
             txt_pendiente.set_position((x_actual[idx_medio], y_s[idx_medio]))
             txt_pendiente.set_text(f"pendiente: {d1_actual[idx_medio]:.4g}")
@@ -700,7 +701,7 @@ def main() -> None:
             x_ancho = x_actual[idx_inicio]
             y_ancho = y_s[idx_fin]
             txt_ancho.set_position((x_ancho, y_ancho))
-            txt_ancho.set_text(f"N escalon: {n_escalon}")
+            txt_ancho.set_text(f"N escalon: {n_escalon/n_total_considerado:.4%}")
         else:
             txt_inicio.set_text("")
             txt_fin.set_text("")

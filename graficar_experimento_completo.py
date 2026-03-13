@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,7 +10,7 @@ import pandas as pd
 
 # Configuracion principal
 BASE_DIR = Path(__file__).resolve().parent
-NOMBRE_EXPERIMENTO = "20231027 baf,nh4 ova-647,25d1-488"
+NOMBRE_EXPERIMENTO = "20250924 mhci,mhcii,25d1,lamp"
 INPUT_DIR = BASE_DIR / "input" / NOMBRE_EXPERIMENTO
 OUTPUT_DIR = BASE_DIR / "output" / NOMBRE_EXPERIMENTO
 
@@ -42,6 +43,23 @@ SUAVIZAR_D3_PARA_CRUCES = True
 # Filtro para quitar extremos (muy grandes y muy negativos) en parametros secundarios.
 FILTRO_EXTREMOS_IQR_FACTOR = 3.0
 TIPO_FILTRO_VALORES_GRANDES = "IQR_bilateral"
+
+# Modo de grafico para parametros secundarios: "puntos" o "linea"
+MODO_GRAFICO_SECUNDARIOS = "linea"
+
+# Suavizado de la linea en parametros secundarios (solo si MODO_GRAFICO_SECUNDARIOS == "linea")
+SECUNDARIOS_METODO_SUAVIZADO = "moving_average"
+SECUNDARIOS_VENTANA_PCT_INICIAL = 5.0
+SECUNDARIOS_EWM_ALPHA = 0.25
+
+# Parametros secundarios a excluir explicitamente del grafico.
+PARAMETROS_SECUNDARIOS_NO_GRAFICAR = [
+    "Time",
+    "Event#",
+]
+
+# Cantidad maxima de subgraficos secundarios por figura (Figura 2).
+MAX_GRAFICOS_SECUNDARIOS_POR_FIGURA = 6
 
 
 def suavizar_serie(serie: pd.Series, metodo: str, ventana: int, ewm_alpha: float) -> pd.Series:
@@ -132,6 +150,29 @@ def _limpiar_nombre_archivo(nombre: str) -> str:
     return "".join(c for c in base if c.isalnum() or c in permitidos).strip().replace(" ", "_")
 
 
+def _extraer_tiempo_y_grupo_csv(nombre_csv: str) -> tuple[float, str]:
+    base = nombre_csv
+    if base.lower().endswith(".exported.fcs3.csv"):
+        base = base[:-len(".exported.fcs3.csv")]
+    elif base.lower().endswith(".csv"):
+        base = base[:-4]
+
+    # Busca 15/60/120/240 cerca del final y acepta casos pegados al texto
+    # (ej: "ctrl15"), evitando tomar partes de numeros largos (fechas/codigos).
+    patron_tiempo = re.compile(r"(?i)(?<!\d)(15|60|120|240)(?:m)?(?!\d)(?=(?:[ _-]?\d+)*$)")
+    coincidencias = list(patron_tiempo.finditer(base))
+    if not coincidencias:
+        return np.nan, base.strip()
+
+    match = coincidencias[-1]
+    tiempo = float(int(match.group(1)))
+    grupo = base[:match.start(1)].rstrip(" _-")
+    if not grupo:
+        grupo = base.strip()
+
+    return tiempo, grupo
+
+
 def _filtrar_valores_extremos(x: np.ndarray, y: np.ndarray, iqr_factor: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Filtra extremos con limites por IQR: [Q1-k*IQR, Q3+k*IQR]."""
     y = np.asarray(y, dtype=float)
@@ -152,10 +193,17 @@ def _filtrar_valores_extremos(x: np.ndarray, y: np.ndarray, iqr_factor: float) -
     return x[mask], y[mask], mask
 
 
-def _columnas_numericas_secundarias(df: pd.DataFrame, parametro: str) -> list[str]:
+def _columnas_numericas_secundarias(
+    df: pd.DataFrame,
+    parametro: str,
+    parametros_no_graficar: list[str],
+) -> list[str]:
+    excluidos = {parametro}
+    excluidos.update(p.replace(" ", "") for p in parametros_no_graficar)
+
     columnas: list[str] = []
     for col in df.columns:
-        if col == parametro:
+        if col in excluidos:
             continue
         serie = pd.to_numeric(df[col], errors="coerce")
         if serie.notna().sum() >= 3:
@@ -167,6 +215,41 @@ def _serializar_remocion_por_columna(remocion: dict[str, int]) -> str:
     if not remocion:
         return ""
     return "; ".join(f"{k}:{v}" for k, v in sorted(remocion.items()))
+
+
+def _media_segmento(valores: np.ndarray) -> float:
+    if len(valores) == 0:
+        return np.nan
+    return float(np.nanmean(valores))
+
+
+def _fmt_media(valor: float) -> str:
+    if np.isnan(valor):
+        return "nan"
+    return f"{valor:.4g}"
+
+
+def _metricas_zona(
+    y_original: np.ndarray,
+    y_procesado: np.ndarray,
+    idx_izq: np.ndarray,
+    idx_esc: np.ndarray,
+    idx_der: np.ndarray,
+) -> dict[str, float]:
+    y_original = np.asarray(y_original, dtype=float)
+    y_procesado = np.asarray(y_procesado, dtype=float)
+
+    return {
+        "media_original_izquierda": _media_segmento(y_original[idx_izq]),
+        "media_original_escalon": _media_segmento(y_original[idx_esc]),
+        "media_original_derecha": _media_segmento(y_original[idx_der]),
+        "media_procesada_izquierda": _media_segmento(y_procesado[idx_izq]),
+        "media_procesada_escalon": _media_segmento(y_procesado[idx_esc]),
+        "media_procesada_derecha": _media_segmento(y_procesado[idx_der]),
+        "n_original_izquierda": float(len(idx_izq)),
+        "n_original_escalon": float(len(idx_esc)),
+        "n_original_derecha": float(len(idx_der)),
+    }
 
 
 def _graficar_figura_derivadas(
@@ -204,6 +287,7 @@ def _graficar_figura_derivadas(
     idx_ini = None
     idx_med = None
     idx_fin = None
+    n_total = len(x_actual)
     pendiente_escalon = np.nan
     pendiente_recta = np.nan
     n_escalon = np.nan
@@ -214,7 +298,6 @@ def _graficar_figura_derivadas(
         if len(idx) == 3:
             ax_param.plot(x_actual[idx], y_s[idx], "o", color="tab:red", markersize=4, label="Escalon")
             idx_ini, idx_med, idx_fin = int(idx[0]), int(idx[1]), int(idx[2])
-            n_total = len(x_actual)
             n_escalon = idx_fin - idx_ini + 1
             pendiente_escalon = float(d1[idx_med])
 
@@ -286,12 +369,12 @@ def _graficar_figura_derivadas(
     plt.close(fig)
 
     metricas = {
-        "idx_inicio_escalon": (int(idx_ini + 1) if idx_ini is not None else np.nan),
-        "idx_fin_escalon": (int(idx_fin + 1) if idx_fin is not None else np.nan),
-        "idx_pendiente_max_escalon": (int(idx_med + 1) if idx_med is not None else np.nan),
+        "idx_inicio_escalon": (float((idx_ini + 1)/n_total) if idx_ini is not None else np.nan),
+        "idx_fin_escalon": (float((idx_fin + 1)/n_total) if idx_fin is not None else np.nan),
+        "idx_pendiente_max_escalon": (float((idx_med + 1)/n_total) if idx_med is not None else np.nan),
         "pendiente_max_escalon": float(pendiente_escalon) if np.isfinite(pendiente_escalon) else np.nan,
         "pendiente_recta_escalon": float(pendiente_recta) if np.isfinite(pendiente_recta) else np.nan,
-        "n_escalon": float(n_escalon) if np.isfinite(n_escalon) else np.nan,
+        "n_escalon": float(n_escalon/n_total) if np.isfinite(n_escalon) else np.nan,
     }
     return salida, metricas
 
@@ -299,105 +382,209 @@ def _graficar_figura_derivadas(
 def _graficar_figura_parametro_y_secundarios(
     csv_path: Path,
     x_actual: np.ndarray,
-    y_base: np.ndarray,
-    y_s: np.ndarray,
-    d1: np.ndarray,
     df_base: pd.DataFrame,
     columnas_secundarias: list[str],
     escalon: list[int],
-) -> tuple[Path, dict[str, int]]:
-    nrows = 1 + len(columnas_secundarias)
-    fig_altura = max(8.0, 2.0 * nrows)
-    fig, axes = plt.subplots(nrows, 1, figsize=(14, fig_altura), sharex=True)
-    if nrows == 1:
-        axes = [axes]
+) -> tuple[list[Path], dict[str, int], list[dict[str, object]]]:
+    max_por_figura = max(1, int(MAX_GRAFICOS_SECUNDARIOS_POR_FIGURA))
+    if columnas_secundarias:
+        bloques_columnas = [
+            columnas_secundarias[i:i + max_por_figura]
+            for i in range(0, len(columnas_secundarias), max_por_figura)
+        ]
+    else:
+        bloques_columnas = [[]]
 
-    ax_param = axes[0]
-    axes_secundarios = axes[1:]
-
-    titulo = (
-        f"{csv_path.name}\n"
-        f"Figura 2: Parametro ordenado + parametros secundarios filtrados por {TIPO_FILTRO_VALORES_GRANDES}"
-    )
-    fig.suptitle(titulo, fontsize=10)
-
-    ax_param.plot(x_actual, y_base, color="0.70", linewidth=1.0, label="Original")
-    ax_param.plot(x_actual, y_s, color="tab:blue", linewidth=1.3, label="Suavizada")
-
+    idx_ini = None
+    idx_fin = None
     if len(escalon) == 3:
         idx = np.array(escalon, dtype=int)
         idx = idx[(idx >= 0) & (idx < len(x_actual))]
         if len(idx) == 3:
-            ax_param.plot(x_actual[idx], y_s[idx], "o", color="tab:red", markersize=4, label="Escalon")
-            idx_ini, idx_med, idx_fin = int(idx[0]), int(idx[1]), int(idx[2])
-            n_total = len(x_actual)
-            n_escalon = idx_fin - idx_ini + 1
-
-            x_ini = x_actual[idx_ini]
-            x_fin = x_actual[idx_fin]
-            y_ini = y_s[idx_ini]
-            y_fin = y_s[idx_fin]
-            ax_param.plot(
-                [x_ini, x_fin],
-                [y_ini, y_fin],
-                color="tab:purple",
-                linewidth=1.4,
-                linestyle="-",
-                alpha=0.35,
-            )
-
-            if x_fin != x_ini:
-                pendiente_recta = (y_fin - y_ini) / (x_fin - x_ini)
-                ax_param.text(
-                    x_actual[idx_ini],
-                    y_s[idx_fin],
-                    f"m recta: {pendiente_recta:.4g}",
-                    fontsize=8,
-                    color="tab:purple",
-                    ha="left",
-                    va="bottom",
-                )
-
-            ax_param.text(50 + x_actual[idx_ini], y_s[idx_ini], f"ini: {idx_ini + 1}/{n_total}", fontsize=8, color="tab:red")
-            ax_param.text(50 + x_actual[idx_fin], y_s[idx_fin], f"fin: {idx_fin + 1}/{n_total}", fontsize=8, color="tab:red")
-            ax_param.text(50 + x_actual[idx_med], y_s[idx_med], f"pendiente: {d1[idx_med]:.4g}", fontsize=8, color="tab:purple")
-            ax_param.text(50 + x_actual[idx_med], y_s[idx_med] - 50, f"N escalon: {n_escalon}", fontsize=8, color="tab:green", va="top")
-
-    ax_param.set_ylabel(PARAMETRO)
-    ax_param.grid(True, linestyle="--", alpha=0.3)
-    ax_param.legend(loc="best", fontsize=8)
-
-    remocion_por_columna: dict[str, int] = {}
-    for ax_sec, col in zip(axes_secundarios, columnas_secundarias):
-        y_col = pd.to_numeric(df_base[col], errors="coerce").interpolate(limit_direction="both").to_numpy(dtype=float)
-        x_col = x_actual.copy()
-        mask_finito = np.isfinite(y_col)
-        x_col = x_col[mask_finito]
-        y_col = y_col[mask_finito]
-
-        x_fil, y_fil, _ = _filtrar_valores_extremos(x_col, y_col, FILTRO_EXTREMOS_IQR_FACTOR)
-        remocion_por_columna[col] = int(len(y_col) - len(y_fil))
-
-        ax_sec.scatter(x_fil, y_fil, s=8, color="tab:gray", alpha=0.75, label=f"{col} filtrado")
-        ax_sec.set_ylabel(col)
-        ax_sec.grid(True, linestyle="--", alpha=0.3)
-        ax_sec.legend(loc="best", fontsize=7)
-
-    axes[-1].set_xlabel("Cuenta acumulativa de fagosomas")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+            idx_ini = int(idx[0])
+            idx_fin = int(idx[2])
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    salida = OUTPUT_DIR / f"analisis_parametro_y_resto_{_limpiar_nombre_archivo(csv_path.name)}.png"
-    fig.savefig(salida, dpi=220)
-    plt.close(fig)
-    return salida, remocion_por_columna
+    salidas: list[Path] = []
+    remocion_por_columna: dict[str, int] = {}
+    metricas_por_parametro: list[dict[str, object]] = []
+
+    total_figuras = len(bloques_columnas)
+    for i_figura, bloque in enumerate(bloques_columnas, start=1):
+        nrows = max(1, len(bloque))
+        fig_altura = max(8.0, 2.0 * nrows)
+        fig, axes = plt.subplots(nrows, 1, figsize=(14, fig_altura), sharex=True)
+        if nrows == 1:
+            axes = [axes]
+
+        titulo = (
+            f"{csv_path.name}\n"
+            f"Figura 2 ({i_figura}/{total_figuras}): Parametros secundarios | "
+            f"Modo: {MODO_GRAFICO_SECUNDARIOS}"
+        )
+        fig.suptitle(titulo, fontsize=10)
+
+        if len(bloque) == 0:
+            axes[0].text(
+                0.5,
+                0.5,
+                "Sin parametros secundarios numericos",
+                transform=axes[0].transAxes,
+                ha="center",
+                va="center",
+                fontsize=10,
+            )
+            axes[0].grid(True, linestyle="--", alpha=0.3)
+        else:
+            for ax_sec, col in zip(axes, bloque):
+                y_col = pd.to_numeric(df_base[col], errors="coerce").interpolate(limit_direction="both").to_numpy(dtype=float)
+                x_col = x_actual.copy()
+                mask_finito = np.isfinite(y_col)
+                x_col = x_col[mask_finito]
+                y_col = y_col[mask_finito]
+
+                idx_izq = np.array([], dtype=int)
+                idx_esc = np.array([], dtype=int)
+                idx_der = np.array([], dtype=int)
+                metricas_zona = {
+                    "media_original_izquierda": np.nan,
+                    "media_original_escalon": np.nan,
+                    "media_original_derecha": np.nan,
+                    "media_procesada_izquierda": np.nan,
+                    "media_procesada_escalon": np.nan,
+                    "media_procesada_derecha": np.nan,
+                    "n_original_izquierda": np.nan,
+                    "n_original_escalon": np.nan,
+                    "n_original_derecha": np.nan,
+                }
+
+                if MODO_GRAFICO_SECUNDARIOS == "puntos":
+                    x_fil, y_fil, _ = _filtrar_valores_extremos(x_col, y_col, FILTRO_EXTREMOS_IQR_FACTOR)
+                    remocion_por_columna[col] = int(len(y_col) - len(y_fil))
+                    ax_sec.scatter(x_fil, y_fil, s=8, color="tab:gray", alpha=0.75, label=f"{col} filtrado")
+
+                    if idx_ini is not None and idx_fin is not None and len(y_fil) > 0:
+                        idx_global_orig = x_col.astype(int) - 1
+                        idx_izq_o = np.where(idx_global_orig < idx_ini)[0]
+                        idx_esc_o = np.where((idx_global_orig >= idx_ini) & (idx_global_orig <= idx_fin))[0]
+                        idx_der_o = np.where(idx_global_orig > idx_fin)[0]
+
+                        idx_global_fil = x_fil.astype(int) - 1
+                        idx_izq_p = np.where(idx_global_fil < idx_ini)[0]
+                        idx_esc_p = np.where((idx_global_fil >= idx_ini) & (idx_global_fil <= idx_fin))[0]
+                        idx_der_p = np.where(idx_global_fil > idx_fin)[0]
+
+                        metricas_zona = {
+                            "media_original_izquierda": _media_segmento(y_col[idx_izq_o]),
+                            "media_original_escalon": _media_segmento(y_col[idx_esc_o]),
+                            "media_original_derecha": _media_segmento(y_col[idx_der_o]),
+                            "media_procesada_izquierda": _media_segmento(y_fil[idx_izq_p]),
+                            "media_procesada_escalon": _media_segmento(y_fil[idx_esc_p]),
+                            "media_procesada_derecha": _media_segmento(y_fil[idx_der_p]),
+                            "n_original_izquierda": float(len(idx_izq_o)),
+                            "n_original_escalon": float(len(idx_esc_o)),
+                            "n_original_derecha": float(len(idx_der_o)),
+                        }
+                elif MODO_GRAFICO_SECUNDARIOS == "linea":
+                    ventana_sec = _pct_a_ventana(SECUNDARIOS_VENTANA_PCT_INICIAL, len(y_col))
+                    y_suavizada = suavizar_serie(
+                        pd.Series(y_col),
+                        metodo=SECUNDARIOS_METODO_SUAVIZADO,
+                        ventana=ventana_sec,
+                        ewm_alpha=SECUNDARIOS_EWM_ALPHA,
+                    ).to_numpy(dtype=float)
+                    remocion_por_columna[col] = 0
+                    ax_sec.plot(
+                        x_col,
+                        y_suavizada,
+                        color="tab:gray",
+                        linewidth=1.1,
+                        alpha=0.9,
+                        label=f"{col} suavizado ({SECUNDARIOS_METODO_SUAVIZADO})",
+                    )
+
+                    if idx_ini is not None and idx_fin is not None and len(y_col) > 0:
+                        idx_global = x_col.astype(int) - 1
+                        idx_izq = np.where(idx_global < idx_ini)[0]
+                        idx_esc = np.where((idx_global >= idx_ini) & (idx_global <= idx_fin))[0]
+                        idx_der = np.where(idx_global > idx_fin)[0]
+                        metricas_zona = _metricas_zona(y_col, y_suavizada, idx_izq, idx_esc, idx_der)
+                else:
+                    raise ValueError('MODO_GRAFICO_SECUNDARIOS invalido. Use "puntos" o "linea"')
+
+                if idx_ini is not None and idx_fin is not None:
+                    ax_sec.axvline(
+                        x_actual[idx_ini],
+                        color="tab:red",
+                        linestyle="--",
+                        linewidth=1.0,
+                        alpha=0.8,
+                        label="Inicio escalon",
+                    )
+                    ax_sec.axvline(
+                        x_actual[idx_fin],
+                        color="tab:red",
+                        linestyle="--",
+                        linewidth=1.0,
+                        alpha=0.8,
+                        label="Fin escalon",
+                    )
+
+                ax_sec.set_ylabel(col)
+                ax_sec.grid(True, linestyle="--", alpha=0.3)
+
+                ax_sec.text(
+                    0.01,
+                    0.99,
+                    (
+                        "Orig I/E/D: "
+                        f"{_fmt_media(metricas_zona['media_original_izquierda'])} / "
+                        f"{_fmt_media(metricas_zona['media_original_escalon'])} / "
+                        f"{_fmt_media(metricas_zona['media_original_derecha'])}\n"
+                        "Proc I/E/D: "
+                        f"{_fmt_media(metricas_zona['media_procesada_izquierda'])} / "
+                        f"{_fmt_media(metricas_zona['media_procesada_escalon'])} / "
+                        f"{_fmt_media(metricas_zona['media_procesada_derecha'])}"
+                    ),
+                    transform=ax_sec.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=7,
+                    bbox={"facecolor": "white", "alpha": 0.65, "edgecolor": "none"},
+                )
+                ax_sec.legend(loc="best", fontsize=7)
+
+                metricas_por_parametro.append(
+                    {
+                        "csv": csv_path.name,
+                        "parametro_secundario": col,
+                        "modo_secundarios": MODO_GRAFICO_SECUNDARIOS,
+                        "idx_inicio_escalon": (idx_ini + 1) if idx_ini is not None else np.nan,
+                        "idx_fin_escalon": (idx_fin + 1) if idx_fin is not None else np.nan,
+                        **metricas_zona,
+                        "puntos_removidos": remocion_por_columna.get(col, 0),
+                    }
+                )
+
+        axes[-1].set_xlabel("Cuenta acumulativa de fagosomas")
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        salida = OUTPUT_DIR / (
+            f"analisis_parametro_y_resto_{_limpiar_nombre_archivo(csv_path.name)}"
+            f"_p{i_figura:02d}.png"
+        )
+        fig.savefig(salida, dpi=220)
+        plt.close(fig)
+        salidas.append(salida)
+
+    return salidas, remocion_por_columna, metricas_por_parametro
 
 
 def procesar_csv(csv_path: Path) -> dict[str, object] | None:
     global PARAMETRO
+    tiempo_min, grupo_csv = _extraer_tiempo_y_grupo_csv(csv_path.name)
+
     df = pd.read_csv(csv_path, encoding="utf-8-sig")
-    df.columns = df.columns.str.replace('"', '')
-    df.columns = df.columns.str.replace(' ', '')
+    df.columns = df.columns.str.replace('"', '').str.replace(' ', '')
     while PARAMETRO not in df.columns:
         print(f"[WARN] {csv_path.name}: falta columna {PARAMETRO}")
         print(df.columns)
@@ -462,7 +649,11 @@ def procesar_csv(csv_path: Path) -> dict[str, object] | None:
     candidatos_d2 = _candidatos_por_cruce_cero(d3)
     escalon = encontrar_escalon(d1, candidatos_d1, candidatos_d2)
 
-    columnas_secundarias = _columnas_numericas_secundarias(df_base, PARAMETRO)
+    columnas_secundarias = _columnas_numericas_secundarias(
+        df_base,
+        PARAMETRO,
+        PARAMETROS_SECUNDARIOS_NO_GRAFICAR,
+    )
     salida_fig1, metricas = _graficar_figura_derivadas(
         csv_path=csv_path,
         x_actual=x_actual,
@@ -482,21 +673,25 @@ def procesar_csv(csv_path: Path) -> dict[str, object] | None:
         ventana_d2=ventana_d2,
     )
 
-    salida_fig2, remocion_por_columna = _graficar_figura_parametro_y_secundarios(
+    salidas_fig2, remocion_por_columna, metricas_secundarios = _graficar_figura_parametro_y_secundarios(
         csv_path=csv_path,
         x_actual=x_actual,
-        y_base=y_base,
-        y_s=y_s,
-        d1=d1,
         df_base=df_base,
         columnas_secundarias=columnas_secundarias,
         escalon=escalon,
     )
 
+    for fila in metricas_secundarios:
+        fila["tiempo_min"] = tiempo_min
+        fila["grupo_csv"] = grupo_csv
+
     return {
         "csv": csv_path.name,
+        "grupo_csv": grupo_csv,
+        "tiempo_min": tiempo_min,
         "salida_figura_1": str(salida_fig1),
-        "salida_figura_2": str(salida_fig2),
+        "salida_figura_2": " | ".join(str(p) for p in salidas_fig2),
+        "n_figuras_secundarios": int(len(salidas_fig2)),
         "n_total_ordenado": int(len(y_original)),
         "n_post_recorte": int(len(y_base)),
         "idx_inicio_escalon": metricas["idx_inicio_escalon"],
@@ -507,6 +702,7 @@ def procesar_csv(csv_path: Path) -> dict[str, object] | None:
         "n_escalon": metricas["n_escalon"],
         "columnas_secundarias_filtradas": len(columnas_secundarias),
         "puntos_removidos_por_columna": _serializar_remocion_por_columna(remocion_por_columna),
+        "metricas_secundarios": metricas_secundarios,
     }
 
 
@@ -523,10 +719,12 @@ def main() -> None:
 
     generados = 0
     resultados: list[dict[str, object]] = []
+    metricas_secundarios_todos: list[dict[str, object]] = []
     for csv_path in csv_files:
         resultado = procesar_csv(csv_path)
         if resultado is not None:
             generados += 1
+            metricas_secundarios_todos.extend(resultado.pop("metricas_secundarios", []))
             resultados.append(resultado)
             print(
                 f"[OK] {csv_path.name} -> {resultado['salida_figura_1']} | "
@@ -556,15 +754,60 @@ def main() -> None:
             },
             {
                 "parametro": "APLICACION_FILTRO_VALORES_GRANDES",
-                "valor": "Solo parametros secundarios del CSV (no parametro ordenado ni derivadas)",
+                "valor": "Solo en modo puntos para parametros secundarios del CSV",
+            },
+            {"parametro": "MODO_GRAFICO_SECUNDARIOS", "valor": MODO_GRAFICO_SECUNDARIOS},
+            {"parametro": "SECUNDARIOS_METODO_SUAVIZADO", "valor": SECUNDARIOS_METODO_SUAVIZADO},
+            {"parametro": "SECUNDARIOS_VENTANA_PCT_INICIAL", "valor": SECUNDARIOS_VENTANA_PCT_INICIAL},
+            {"parametro": "SECUNDARIOS_EWM_ALPHA", "valor": SECUNDARIOS_EWM_ALPHA},
+            {"parametro": "MAX_GRAFICOS_SECUNDARIOS_POR_FIGURA", "valor": MAX_GRAFICOS_SECUNDARIOS_POR_FIGURA},
+            {
+                "parametro": "PARAMETROS_SECUNDARIOS_NO_GRAFICAR",
+                "valor": ", ".join(PARAMETROS_SECUNDARIOS_NO_GRAFICAR),
             },
         ]
     )
 
     df_resultados = pd.DataFrame(resultados)
+    df_metricas_secundarios = pd.DataFrame(metricas_secundarios_todos)
+
+    if not df_resultados.empty:
+        orden_grupos = {
+            grupo: i
+            for i, grupo in enumerate(pd.unique(df_resultados["grupo_csv"]))
+        }
+        df_resultados["_orden_grupo"] = df_resultados["grupo_csv"].map(orden_grupos).fillna(10**6)
+        df_resultados["_orden_tiempo"] = pd.to_numeric(df_resultados["tiempo_min"], errors="coerce").fillna(999)
+        df_resultados.sort_values(["_orden_grupo", "_orden_tiempo", "csv"], inplace=True)
+        df_resultados.drop(columns=["_orden_grupo", "_orden_tiempo"], inplace=True)
+
+        if not df_metricas_secundarios.empty:
+            df_metricas_secundarios["_orden_parametro"] = df_metricas_secundarios["parametro_secundario"].astype(str)
+            df_metricas_secundarios["_orden_grupo"] = df_metricas_secundarios["grupo_csv"].map(orden_grupos).fillna(10**6)
+            df_metricas_secundarios["_orden_tiempo"] = pd.to_numeric(df_metricas_secundarios["tiempo_min"], errors="coerce").fillna(999)
+            df_metricas_secundarios.sort_values(
+                ["_orden_parametro", "_orden_grupo", "_orden_tiempo", "csv"],
+                inplace=True,
+            )
+
+            columnas_metricas = [
+                "parametro_secundario",
+                "grupo_csv",
+                "tiempo_min",
+                "csv",
+                "media_original_izquierda",
+                "media_original_escalon",
+                "media_original_derecha",
+                "media_procesada_izquierda",
+                "media_procesada_escalon",
+                "media_procesada_derecha",
+            ]
+            df_metricas_secundarios = df_metricas_secundarios[columnas_metricas]
+
     with pd.ExcelWriter(excel_salida, engine="openpyxl") as writer:
         df_config.to_excel(writer, sheet_name="configuracion", index=False)
         df_resultados.to_excel(writer, sheet_name="resumen_por_csv", index=False)
+        df_metricas_secundarios.to_excel(writer, sheet_name="metricas_secundarios_zonas", index=False)
 
     print(f"Figuras generadas: {generados}")
     print(f"Salida: {OUTPUT_DIR}")
