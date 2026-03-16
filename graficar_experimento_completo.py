@@ -10,7 +10,7 @@ import pandas as pd
 
 # Configuracion principal
 BASE_DIR = Path(__file__).resolve().parent
-NOMBRE_EXPERIMENTO = "20250924 mhci,mhcii,25d1,lamp"
+NOMBRE_EXPERIMENTO = "20251001 eea1, lamp"
 INPUT_DIR = BASE_DIR / "input" / NOMBRE_EXPERIMENTO
 OUTPUT_DIR = BASE_DIR / "output" / NOMBRE_EXPERIMENTO
 
@@ -229,6 +229,12 @@ def _fmt_media(valor: float) -> str:
     return f"{valor:.4g}"
 
 
+def _valor_relativo_total_pct(valor: float, total: float) -> float:
+    if not np.isfinite(valor) or not np.isfinite(total) or total == 0:
+        return np.nan
+    return float(100.0 * valor / total)
+
+
 def _metricas_zona(
     y_original: np.ndarray,
     y_procesado: np.ndarray,
@@ -288,9 +294,15 @@ def _graficar_figura_derivadas(
     idx_med = None
     idx_fin = None
     n_total = len(x_actual)
+    total_parametro = float(y_base[0])
     pendiente_escalon = np.nan
     pendiente_recta = np.nan
     n_escalon = np.nan
+    parametro_inicio_rel_total_pct = np.nan
+    parametro_fin_rel_total_pct = np.nan
+    media_parametro_izquierda_rel_total_pct = np.nan
+    media_parametro_escalon_rel_total_pct = np.nan
+    media_parametro_derecha_rel_total_pct = np.nan
 
     if len(escalon) == 3:
         idx = np.array(escalon, dtype=int)
@@ -300,6 +312,21 @@ def _graficar_figura_derivadas(
             idx_ini, idx_med, idx_fin = int(idx[0]), int(idx[1]), int(idx[2])
             n_escalon = idx_fin - idx_ini + 1
             pendiente_escalon = float(d1[idx_med])
+            parametro_inicio_rel_total_pct = _valor_relativo_total_pct(y_base[idx_ini], total_parametro)
+            parametro_fin_rel_total_pct = _valor_relativo_total_pct(y_base[idx_fin], total_parametro)
+
+            media_parametro_izquierda_rel_total_pct = _valor_relativo_total_pct(
+                _media_segmento(y_base[:idx_ini]),
+                total_parametro,
+            )
+            media_parametro_escalon_rel_total_pct = _valor_relativo_total_pct(
+                _media_segmento(y_base[idx_ini:idx_fin + 1]),
+                total_parametro,
+            )
+            media_parametro_derecha_rel_total_pct = _valor_relativo_total_pct(
+                _media_segmento(y_base[idx_fin + 1:]),
+                total_parametro,
+            )
 
             x_ini = x_actual[idx_ini]
             x_fin = x_actual[idx_fin]
@@ -375,6 +402,11 @@ def _graficar_figura_derivadas(
         "pendiente_max_escalon": float(pendiente_escalon) if np.isfinite(pendiente_escalon) else np.nan,
         "pendiente_recta_escalon": float(pendiente_recta) if np.isfinite(pendiente_recta) else np.nan,
         "n_escalon": float(n_escalon/n_total) if np.isfinite(n_escalon) else np.nan,
+        "parametro_inicio_rel_total_pct": parametro_inicio_rel_total_pct,
+        "parametro_fin_rel_total_pct": parametro_fin_rel_total_pct,
+        "media_parametro_izquierda_rel_total_pct": media_parametro_izquierda_rel_total_pct,
+        "media_parametro_escalon_rel_total_pct": media_parametro_escalon_rel_total_pct,
+        "media_parametro_derecha_rel_total_pct": media_parametro_derecha_rel_total_pct,
     }
     return salida, metricas
 
@@ -700,6 +732,11 @@ def procesar_csv(csv_path: Path) -> dict[str, object] | None:
         "pendiente_max_escalon": metricas["pendiente_max_escalon"],
         "pendiente_recta_escalon": metricas["pendiente_recta_escalon"],
         "n_escalon": metricas["n_escalon"],
+        "parametro_inicio_rel_total_pct": metricas["parametro_inicio_rel_total_pct"],
+        "parametro_fin_rel_total_pct": metricas["parametro_fin_rel_total_pct"],
+        "media_parametro_izquierda_rel_total_pct": metricas["media_parametro_izquierda_rel_total_pct"],
+        "media_parametro_escalon_rel_total_pct": metricas["media_parametro_escalon_rel_total_pct"],
+        "media_parametro_derecha_rel_total_pct": metricas["media_parametro_derecha_rel_total_pct"],
         "columnas_secundarias_filtradas": len(columnas_secundarias),
         "puntos_removidos_por_columna": _serializar_remocion_por_columna(remocion_por_columna),
         "metricas_secundarios": metricas_secundarios,
