@@ -10,7 +10,7 @@ import pandas as pd
 
 # Configuracion principal
 BASE_DIR = Path(__file__).resolve().parent
-NOMBRE_EXPERIMENTO = "20251001 eea1, lamp"
+NOMBRE_EXPERIMENTO = "20251010 mhci,mhcii,25d1,lamp"
 INPUT_DIR = BASE_DIR / "input" / NOMBRE_EXPERIMENTO
 OUTPUT_DIR = BASE_DIR / "output" / NOMBRE_EXPERIMENTO
 
@@ -223,6 +223,12 @@ def _media_segmento(valores: np.ndarray) -> float:
     return float(np.nanmean(valores))
 
 
+def _suma_segmento(valores: np.ndarray) -> float:
+    if len(valores) == 0:
+        return np.nan
+    return float(np.nansum(valores))
+
+
 def _fmt_media(valor: float) -> str:
     if np.isnan(valor):
         return "nan"
@@ -249,9 +255,15 @@ def _metricas_zona(
         "media_original_izquierda": _media_segmento(y_original[idx_izq]),
         "media_original_escalon": _media_segmento(y_original[idx_esc]),
         "media_original_derecha": _media_segmento(y_original[idx_der]),
+        "suma_original_izquierda": _suma_segmento(y_original[idx_izq]),
+        "suma_original_escalon": _suma_segmento(y_original[idx_esc]),
+        "suma_original_derecha": _suma_segmento(y_original[idx_der]),
         "media_procesada_izquierda": _media_segmento(y_procesado[idx_izq]),
         "media_procesada_escalon": _media_segmento(y_procesado[idx_esc]),
         "media_procesada_derecha": _media_segmento(y_procesado[idx_der]),
+        "suma_procesada_izquierda": _suma_segmento(y_procesado[idx_izq]),
+        "suma_procesada_escalon": _suma_segmento(y_procesado[idx_esc]),
+        "suma_procesada_derecha": _suma_segmento(y_procesado[idx_der]),
         "n_original_izquierda": float(len(idx_izq)),
         "n_original_escalon": float(len(idx_esc)),
         "n_original_derecha": float(len(idx_der)),
@@ -294,7 +306,7 @@ def _graficar_figura_derivadas(
     idx_med = None
     idx_fin = None
     n_total = len(x_actual)
-    total_parametro = float(y_base[0])
+    total_parametro = float(np.nansum(y_base))
     pendiente_escalon = np.nan
     pendiente_recta = np.nan
     n_escalon = np.nan
@@ -482,9 +494,15 @@ def _graficar_figura_parametro_y_secundarios(
                     "media_original_izquierda": np.nan,
                     "media_original_escalon": np.nan,
                     "media_original_derecha": np.nan,
+                    "suma_original_izquierda": np.nan,
+                    "suma_original_escalon": np.nan,
+                    "suma_original_derecha": np.nan,
                     "media_procesada_izquierda": np.nan,
                     "media_procesada_escalon": np.nan,
                     "media_procesada_derecha": np.nan,
+                    "suma_procesada_izquierda": np.nan,
+                    "suma_procesada_escalon": np.nan,
+                    "suma_procesada_derecha": np.nan,
                     "n_original_izquierda": np.nan,
                     "n_original_escalon": np.nan,
                     "n_original_derecha": np.nan,
@@ -510,9 +528,15 @@ def _graficar_figura_parametro_y_secundarios(
                             "media_original_izquierda": _media_segmento(y_col[idx_izq_o]),
                             "media_original_escalon": _media_segmento(y_col[idx_esc_o]),
                             "media_original_derecha": _media_segmento(y_col[idx_der_o]),
+                            "suma_original_izquierda": _suma_segmento(y_col[idx_izq_o]),
+                            "suma_original_escalon": _suma_segmento(y_col[idx_esc_o]),
+                            "suma_original_derecha": _suma_segmento(y_col[idx_der_o]),
                             "media_procesada_izquierda": _media_segmento(y_fil[idx_izq_p]),
                             "media_procesada_escalon": _media_segmento(y_fil[idx_esc_p]),
                             "media_procesada_derecha": _media_segmento(y_fil[idx_der_p]),
+                            "suma_procesada_izquierda": _suma_segmento(y_fil[idx_izq_p]),
+                            "suma_procesada_escalon": _suma_segmento(y_fil[idx_esc_p]),
+                            "suma_procesada_derecha": _suma_segmento(y_fil[idx_der_p]),
                             "n_original_izquierda": float(len(idx_izq_o)),
                             "n_original_escalon": float(len(idx_esc_o)),
                             "n_original_derecha": float(len(idx_der_o)),
@@ -573,10 +597,18 @@ def _graficar_figura_parametro_y_secundarios(
                         f"{_fmt_media(metricas_zona['media_original_izquierda'])} / "
                         f"{_fmt_media(metricas_zona['media_original_escalon'])} / "
                         f"{_fmt_media(metricas_zona['media_original_derecha'])}\n"
+                        "Suma Orig I/E/D: "
+                        f"{_fmt_media(metricas_zona['suma_original_izquierda'])} / "
+                        f"{_fmt_media(metricas_zona['suma_original_escalon'])} / "
+                        f"{_fmt_media(metricas_zona['suma_original_derecha'])}\n"
                         "Proc I/E/D: "
                         f"{_fmt_media(metricas_zona['media_procesada_izquierda'])} / "
                         f"{_fmt_media(metricas_zona['media_procesada_escalon'])} / "
-                        f"{_fmt_media(metricas_zona['media_procesada_derecha'])}"
+                        f"{_fmt_media(metricas_zona['media_procesada_derecha'])}\n"
+                        "Suma Proc I/E/D: "
+                        f"{_fmt_media(metricas_zona['suma_procesada_izquierda'])} / "
+                        f"{_fmt_media(metricas_zona['suma_procesada_escalon'])} / "
+                        f"{_fmt_media(metricas_zona['suma_procesada_derecha'])}"
                     ),
                     transform=ax_sec.transAxes,
                     va="top",
@@ -835,9 +867,15 @@ def main() -> None:
                 "media_original_izquierda",
                 "media_original_escalon",
                 "media_original_derecha",
+                "suma_original_izquierda",
+                "suma_original_escalon",
+                "suma_original_derecha",
                 "media_procesada_izquierda",
                 "media_procesada_escalon",
                 "media_procesada_derecha",
+                "suma_procesada_izquierda",
+                "suma_procesada_escalon",
+                "suma_procesada_derecha",
             ]
             df_metricas_secundarios = df_metricas_secundarios[columnas_metricas]
 
